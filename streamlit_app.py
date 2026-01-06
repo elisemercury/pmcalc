@@ -37,6 +37,7 @@ def calculate_total():
             "1oz Gold Kangaroo",
             "100g Gold Bar",
             "20g Gold Bar",
+            "10 Gulden Gold Coin",
             "1kg Silver Kookaburra Coin",
             "1oz Silver Kangaroo",
             "1oz Palladium Bar"
@@ -45,11 +46,12 @@ def calculate_total():
             "https://ankauf.goldvorsorge.at/1-oz-gold-australian-kanguru-nugget.html",
             "https://ankauf.goldvorsorge.at/100g-goldbarren-argor-heraeus.html",
             "https://ankauf.goldvorsorge.at/20g-goldbarren-argor-heraeus.html",
+            "https://ankauf.goldvorsorge.at/10-gulden-gold-wilhelmina.html",
             "https://ankauf.goldvorsorge.at/1kg-silbermunze-kookaburra.html",
             "https://ankauf.goldvorsorge.at/1-oz-silber-kanguru.html",
             "https://ankauf.goldvorsorge.at/1-oz-palladium-diverse-hersteller.html"
         ],
-        'Quantity': [13, 3, 9, 3, 655, 1],
+        'Quantity': [13, 3, 9, 1, 3, 655, 1],
         'Price': []
     }
     
