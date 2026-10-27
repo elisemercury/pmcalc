@@ -24,14 +24,30 @@ def get_price(url, page):
     response = page.goto(
         url, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS
     )
-    if response is not None and response.status >= 400:
-        raise PriceFetchError(f"Product page returned HTTP {response.status}: {url}")
-
+    # The security-check document may itself return 403 before JavaScript
+    # redirects to the product. Wait for the final price instead of rejecting
+    # that initial response.
     # Unlike sleeping after requests.get(), this lets page JavaScript and
     # automatic redirects run while the browser retains the site's cookies.
     page.wait_for_timeout(INITIAL_WAIT_MS)
     price_node = page.locator(PRICE_SELECTOR).first
-    price_node.wait_for(state="visible", timeout=PRICE_TIMEOUT_MS)
+    try:
+        price_node.wait_for(state="visible", timeout=PRICE_TIMEOUT_MS)
+    except Exception:
+        # Public product-page diagnostics help distinguish a slow check from
+        # an actual refusal from the source site in Streamlit's server logs.
+        try:
+            print(
+                "Price page not ready:",
+                {"url": url,
+                 "initial_http": response.status if response else None,
+                 "title": page.title(),
+                 "message": page.locator("body").inner_text(timeout=3_000)[:800]},
+                flush=True,
+            )
+        except Exception:
+            pass
+        raise
 
     try:
         price = float(price_node.get_attribute("data-price-amount"))
