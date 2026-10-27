@@ -1,27 +1,95 @@
 import streamlit as st
 import pandas as pd
-import requests
-from bs4 import BeautifulSoup
-import json
+from datetime import datetime, timezone
+
+import math
+import os
+import shutil
+
+INITIAL_WAIT_MS = 3_000
+PRICE_TIMEOUT_MS = 20_000
+NAVIGATION_TIMEOUT_MS = 45_000
+# Scope this to the main product, excluding prices in related-product cards.
+PRICE_SELECTOR = (
+    ".add-to-cart-area [id^='product-price-'][data-price-amount]"
+)
 
 
-def get_price(url):
-    """
-    Fetch and extract the price from a URL.
-    
-    Args:
-        url: The webpage URL
-        
-    Returns:
-        float: The price (e.g., 2182.70)
-    """
-    response = requests.get(url)
-    soup = BeautifulSoup(response.text, 'html.parser')
-    
-    json_ld = soup.find('script', type='application/ld+json')
-    data = json.loads(json_ld.string)
-    
-    return float(data['offers']['price'])
+class PriceFetchError(RuntimeError):
+    """A complete, usable set of current prices could not be retrieved."""
+
+
+def get_price(url, page):
+    """Navigate with JavaScript enabled, wait three seconds, then read the price."""
+    response = page.goto(
+        url, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS
+    )
+    if response is not None and response.status >= 400:
+        raise PriceFetchError(f"Product page returned HTTP {response.status}: {url}")
+
+    # Unlike sleeping after requests.get(), this lets page JavaScript and
+    # automatic redirects run while the browser retains the site's cookies.
+    page.wait_for_timeout(INITIAL_WAIT_MS)
+    price_node = page.locator(PRICE_SELECTOR).first
+    price_node.wait_for(state="visible", timeout=PRICE_TIMEOUT_MS)
+
+    try:
+        price = float(price_node.get_attribute("data-price-amount"))
+    except (TypeError, ValueError) as exc:
+        raise PriceFetchError(f"The product price was invalid: {url}") from exc
+    if not math.isfinite(price) or price <= 0:
+        raise PriceFetchError(f"The product price was invalid: {url}")
+    return price
+
+
+def fetch_prices(urls):
+    """Use one isolated browser session for the whole portfolio; return no partial set."""
+    from playwright.sync_api import Error as PlaywrightError
+    from playwright.sync_api import sync_playwright
+
+    executable = os.environ.get("PMCALC_CHROMIUM_EXECUTABLE")
+    if not executable:
+        executable = shutil.which("chromium") or shutil.which("chromium-browser")
+    launch_options = {"headless": True}
+    if executable:
+        launch_options["executable_path"] = executable
+
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(**launch_options)
+            try:
+                context = browser.new_context(locale="de-AT")
+                try:
+                    page = context.new_page()
+                    prices = []
+                    for url in urls:
+                        try:
+                            prices.append(get_price(url, page))
+                        except PlaywrightError as exc:
+                            # A check can occasionally require human interaction.
+                            # Do not click verification controls or fabricate prices.
+                            try:
+                                title = page.title().casefold()
+                            except PlaywrightError:
+                                title = ""
+                            if "sicherheitsprüfung" in title:
+                                raise PriceFetchError(
+                                    "Goldvorsorge's security check did not finish "
+                                    "automatically. Please try again later."
+                                ) from exc
+                            raise PriceFetchError(
+                                f"Could not load the current product price: {url}"
+                            ) from exc
+                    return prices
+                finally:
+                    context.close()
+            finally:
+                browser.close()
+    except PlaywrightError as exc:
+        raise PriceFetchError(
+            "The price browser could not start or complete the request. "
+            "Please try again later."
+        ) from exc
 
 
 def calculate_total():
@@ -56,12 +124,7 @@ def calculate_total():
     }
     
     # Fetch prices from URLs
-    prices = []
-    for url in data['URL']:
-        price = get_price(url)
-        prices.append(price)
-    
-    data['Price'] = prices
+    data['Price'] = fetch_prices(data['URL'])
     
     # Create DataFrame
     df = pd.DataFrame(data)
@@ -80,26 +143,46 @@ def main():
     
     st.title("Precious Metals Portfolio Value Calculator")
     
-    # Initialize session state to store results
-    if 'total' not in st.session_state:
-        st.session_state.total = None
-        st.session_state.df = None
-    
-    # Calculate on first page load
-    if st.session_state.total is None:
-        with st.spinner('Fetching current prices...'):
-            st.session_state.total, st.session_state.df = calculate_total()
-    
-    # Center the button using columns
+    # Keep the last complete result if a later refresh fails.
+    for key, default in (
+        ("total", None), ("df", None), ("prices_updated_at", None),
+        ("price_error", None),
+    ):
+        st.session_state.setdefault(key, default)
+
     col1, col2, col3 = st.columns([1, 2, 1])
-    
     with col2:
-        if st.button("Recalculate Total Value", use_container_width=True, type="primary"):
-            # Recalculate when button is clicked
-            with st.spinner('Fetching current prices...'):
-                st.session_state.total, st.session_state.df = calculate_total()
-            st.rerun()
-    
+        refresh = st.button(
+            "Recalculate Total Value", use_container_width=True, type="primary"
+        )
+
+    if refresh or st.session_state.total is None:
+        with st.spinner("Loading product pages and waiting for current prices..."):
+            try:
+                total, df = calculate_total()
+            except PriceFetchError as exc:
+                st.session_state.price_error = str(exc)
+            else:
+                st.session_state.total = total
+                st.session_state.df = df
+                st.session_state.prices_updated_at = datetime.now(timezone.utc)
+                st.session_state.price_error = None
+
+    if st.session_state.price_error:
+        st.error(st.session_state.price_error)
+        if st.session_state.total is not None:
+            st.warning("Showing the last successfully fetched prices.")
+
+    if st.session_state.total is None:
+        st.info("No complete price set is available yet. Use the button above to retry.")
+        st.stop()
+
+    if st.session_state.prices_updated_at is not None:
+        st.caption(
+            "Prices last updated: "
+            + st.session_state.prices_updated_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+        )
+
     # Display the total (always shown)
     st.markdown("---")
     st.subheader(f"Total Portfolio Value: €{st.session_state.total:,.2f}")
